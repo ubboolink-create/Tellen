@@ -80,6 +80,10 @@
                 </button>
                 <p id="error-message" class="text-red-500 text-sm h-4"></p>
             </div>
+            <!-- NIEUWE KNOP: Handmatig Afronden -->
+            <button onclick="showFinishArea()" class="w-full py-2 bg-yellow-500 hover:bg-yellow-600 text-white font-bold rounded-lg transition duration-150 mt-4">
+                Tellen Afronden & Resultaten Downloaden
+            </button>
             <button onclick="showJobSelection()" class="w-full text-center text-sm text-gray-500 hover:text-gray-700 mt-4">Terug naar Job Selectie</button>
         </div>
 
@@ -199,6 +203,7 @@
             const dataLines = lines.slice(1);
             
             const rows = dataLines.map(line => {
+                // Eenvoudig splitsen op delimiter, zonder complexe CSV-parser voor nu
                 return line.split(currentDelimiter).map(cell => cell.trim().replace(/^"|"$/g, ''));
             });
 
@@ -231,7 +236,7 @@
             ui.finishArea.classList.add('hidden');
         }
 
-        function showJobSelection() {
+        window.showJobSelection = function() {
             hideAllScreens();
             ui.jobSelectionArea.classList.remove('hidden');
             loadInventoryJobs(); // Laad de lijst opnieuw
@@ -245,7 +250,7 @@
             renderItem();
         }
         
-        function showFinishArea() {
+        window.showFinishArea = function() {
             hideAllScreens();
             ui.finishArea.classList.remove('hidden');
         }
@@ -279,66 +284,81 @@
                 return;
             }
 
-            ui.status.textContent = 'Bezig met uploaden en parsen...';
+            ui.status.textContent = 'Bezig met uploaden en parsen... Dit kan even duren bij grote lijsten.';
 
             // 1. CSV lezen en parsen
-            const csvText = await file.text();
-            const { rows, headers: parsedHeaders } = parseCSV(csvText);
+            try {
+                const csvText = await file.text();
+                const { rows, headers: parsedHeaders } = parseCSV(csvText);
 
-            if (rows.length === 0) {
-                ui.status.textContent = 'Fout: Geen gegevens gevonden in het CSV-bestand.';
-                return;
-            }
-            
-            headers = parsedHeaders; // Sla de headers globaal op voor later downloaden
-
-            // 2. Job Metadata aanmaken
-            const newJobId = 'job_' + Date.now();
-            const jobDocRef = doc(getJobCollectionRef(), newJobId);
-            
-            await setDoc(jobDocRef, {
-                name: jobName,
-                uploaderId: userId,
-                uploadDate: Timestamp.now(),
-                totalItems: rows.length,
-                isFinished: false,
-                headers: headers,
-                delimiter: currentDelimiter // Sla scheidingsteken op voor download
-            });
-
-            // 3. Items in Batch schrijven
-            const itemCollectionRef = getItemCollectionRef(newJobId);
-            let batch = writeBatch(db);
-            let batchCount = 0;
-            
-            rows.forEach((row, index) => {
-                // Item structuur
-                const itemData = {
-                    location: row.length > COL_LOCATION ? row[COL_LOCATION] : '',
-                    article: row.length > COL_ARTICLE ? row[COL_ARTICLE] : '',
-                    initialRowData: JSON.stringify(row), // De complete, originele rij als JSON-string
-                    counted_stock: null, // De waarde die we willen updaten
-                    counted_by: null, // De gebruiker die geteld heeft (voor de taakverdeling)
-                    status: 'NOG TE TELLEN' // Voor het gemak
-                };
-                
-                const itemDocRef = doc(itemCollectionRef, String(index)); // Gebruik index als document ID
-                batch.set(itemDocRef, itemData);
-                batchCount++;
-
-                if (batchCount >= 499) { // Max 500 operaties per batch
-                    batch.commit();
-                    batch = writeBatch(db);
-                    batchCount = 0;
+                if (rows.length === 0) {
+                    ui.status.textContent = 'Fout: Geen gegevens gevonden in het CSV-bestand.';
+                    return;
                 }
-            });
+                
+                headers = parsedHeaders; // Sla de headers globaal op voor later downloaden
 
-            await batch.commit();
+                // 2. Job Metadata aanmaken
+                const newJobId = 'job_' + Date.now();
+                const jobDocRef = doc(getJobCollectionRef(), newJobId);
+                
+                await setDoc(jobDocRef, {
+                    name: jobName,
+                    uploaderId: userId,
+                    uploadDate: Timestamp.now(),
+                    totalItems: rows.length,
+                    isFinished: false,
+                    headers: headers,
+                    delimiter: currentDelimiter // Sla scheidingsteken op voor download
+                });
 
-            ui.status.textContent = `Succesvol ${rows.length} items geüpload voor opdracht: ${jobName}.`;
-            ui.jobNameInput.value = '';
-            ui.csvFileInput.value = '';
-            loadInventoryJobs(); // Vernieuw de lijst
+                // 3. Items in Batch schrijven
+                const itemCollectionRef = getItemCollectionRef(newJobId);
+                let batch = writeBatch(db);
+                let batchCount = 0;
+                
+                rows.forEach((row, index) => {
+                    // Item structuur
+                    const itemData = {
+                        location: row.length > COL_LOCATION ? row[COL_LOCATION] : '',
+                        article: row.length > COL_ARTICLE ? row[COL_ARTICLE] : '',
+                        initialRowData: JSON.stringify(row), // De complete, originele rij als JSON-string
+                        counted_stock: null, // De waarde die we willen updaten
+                        counted_by: null, // De gebruiker die geteld heeft (voor de taakverdeling)
+                        status: 'NOG TE TELLEN' // Voor het gemak
+                    };
+                    
+                    const itemDocRef = doc(itemCollectionRef, String(index)); // Gebruik index als document ID
+                    batch.set(itemDocRef, itemData);
+                    batchCount++;
+
+                    if (batchCount >= 499) { // Max 500 operaties per batch
+                        batch.commit();
+                        batch = writeBatch(db);
+                        batchCount = 0;
+                    }
+                });
+
+                await batch.commit();
+
+                // 4. Succes en Automatisch Starten
+                ui.status.textContent = `Succesvol ${rows.length} items geüpload voor opdracht: ${jobName}. U start nu met tellen.`;
+                ui.jobNameInput.value = '';
+                ui.csvFileInput.value = '';
+
+                // Automatisch de telsessie starten
+                currentJobId = newJobId;
+                currentJobName = jobName;
+                
+                // Roep de startfunctie aan die de UI switcht en de batch claimt
+                startCountingSession(); 
+
+                loadInventoryJobs(); // Vernieuw de lijst voor andere gebruikers
+
+            } catch (error) {
+                console.error("Fout bij uploaden of parsen:", error);
+                ui.status.textContent = `Fout: Kan de lijst niet verwerken. Controleer of het een geldig CSV-bestand is. (${error.message})`;
+            }
         };
 
         /**
